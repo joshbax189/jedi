@@ -27,12 +27,26 @@ class RefactoringCase(object):
         self.start_line_test = start_line_test
         self.desired = desired
 
-    def refactor(self):
-        script = jedi.Script(self.source, self.line_nr, self.index, self.path)
+    def script(self):
+        # note line_nr is deprecated
+        # index/col is also deprecated
+        # they should instead be passed to the script.get_references function!
+        # old_ver:
+        # return jedi.Script(self.source, self.line_nr, self.index, self.path)
+        return jedi.Script(self.source, path=self.path)
+
+    # return the refactoring function to use
+    def refactor_func(self):
         f_name = os.path.basename(self.path)
-        refactor_func = getattr(refactoring, f_name.replace('.py', ''))
-        args = (self.new_name,) if self.new_name else ()
-        return refactor_func(script, *args)
+        return getattr(refactoring, f_name.replace('.py', ''))
+
+    # This requires test source files be named with the refactoring function that
+    # should be applied
+    # TODO this should probably change?
+    def refactor(self):
+        args = (self.new_name, self.line_nr, self.index) if self.new_name else (self.line_nr, self.index)
+        func = self.refactor_func()
+        return func(self.script(), *args)
 
     def run(self):
         refactor_object = self.refactor()

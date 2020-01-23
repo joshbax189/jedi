@@ -51,13 +51,14 @@ class Refactoring(object):
         return '\n'.join(texts)
 
 
-def rename(script, new_name):
+#cf complete() signature in api/__init__.py
+def rename(script, new_name, line=None, column=None, **kwargs):
     """ The `args` / `kwargs` params are the same as in `api.Script`.
     :param new_name: The new name of the script.
     :param script: The source Script object.
     :return: list of changed lines/changed files
     """
-    return Refactoring(_rename(script.get_references(), new_name))
+    return Refactoring(_rename(script.get_references(line, column), new_name))
 
 
 def _rename(names, replace_str):
