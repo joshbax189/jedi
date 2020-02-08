@@ -50,8 +50,14 @@ class Refactoring(object):
             texts.append('\n'.join(udiff))
         return '\n'.join(texts)
 
+    def new_lines(self, old_path):
+        return self.change_dct[old_path][2]
 
-#cf complete() signature in api/__init__.py
+    def set_new_lines(self, path, updates):
+        self.change_dct[path] = (self.change_dct[path][0], self.change_dct[path][1], updates)
+
+
+# cf complete() signature in api/__init__.py
 def rename(script, new_name, line=None, column=None, **kwargs):
     """ The `args` / `kwargs` params are the same as in `api.Script`.
     :param new_name: The new name of the script.
@@ -159,6 +165,13 @@ def extract(script, new_name):
     return Refactoring(dct)
 
 
+# Convert a definition a,b,c = e into the equivalent
+# multi-line definitions.
+# May introduce an extra variable if e cannot be destructured.
+def unpack(script, line=None, column=None):
+    pass
+
+
 def inline(script, line=None, column=None):
     """
     Replace a variable with its definition
@@ -166,17 +179,14 @@ def inline(script, line=None, column=None):
     """
     new_lines = split_lines(python_bytes_to_unicode(script._code))
 
-    dct = {}
-
     definitions = script.goto(line, column)
     assert len(definitions) == 1
 
     stmt = definitions[0]
     assert stmt.type == 'statement'
-    # TODO disallow keywords, methods here
 
-    # a list of definitions
-    references = script.get_references(line, column)
+    # TODO disallow keywords, methods here?
+    # TODO disallow * replacements
 
     # TODO
     # don't allow multi-line refactorings for now.
@@ -184,73 +194,169 @@ def inline(script, line=None, column=None):
 
     # Examples include, multiline lists, dicts, statement continuations or parens.
 
-    # TODO factor this into a method
-    # search forward until next definition, checking for reuses
-    refs2 = []
-    newDefLine = 0
+    targets, remove = _target_definitions(script, stmt)
+
+    stmt_index = stmt.line - 1
+
+    replace_str, line = _split_insertion_expr(stmt, new_lines[stmt_index])
+
+    dct = Refactoring(_rename(targets, replace_str))
+
+    # remove the empty line
+    # new_lines = dct.new_lines(script.path)
+
+    # if line.strip():
+    #     new_lines[stmt_index] = line
+    # else:
+    #     new_lines.pop(stmt_index)
+    # if stmt_index == 156:
+    #     import pdb; pdb.set_trace()
+
+    dct.set_new_lines(script.path,
+                      _cleanup_after_insertion(dct.new_lines(script.path), line, stmt_index, remove))
+    return dct
+
+
+def _target_definitions(script, stmt):
+    """
+    :returns A pair of Definition lists (replace, remove), where replace should be replaced with
+    the inlining expression, and remove should be removed from the final result.
+    The original statement is always in 'remove'.
+    """
+
+    # whether a Definition for x is in "del x"
+    def def_in_del_stmt(d):
+        return d._name.tree_name.parent.type == 'del_stmt'
+
+    def def_in_nl_stmt(d):
+        return d._name.tree_name.parent.type == 'nonlocal_stmt'
+
+    # assumes that references is in same order as source file
+    references = script.get_references(stmt.line, stmt.column)
+
+    active_refs = []
+    remove_refs = []
+    new_def_index = 0
+    seen_original_stmt = False
     for r in references:
+        # skip to original definition
+        # TODO perhaps need to check module name too
         if (r.line, r.column) == (stmt.line, stmt.column):
+            seen_original_stmt = True
+            remove_refs.append(r)
             continue
 
-        if r.is_definition():
-            newDefLine = r.line
-            continue
+        # re-assignment may use original expr, e.g. x=x+1
+        # if not, break the loop
+        if new_def_index > 0 and r.line != new_def_index:
+            break
 
-        if newDefLine > 0:
-            if r.line == newDefLine:
-                refs2.append(r)
+        # In active scope of definition
+        if seen_original_stmt:
+            # mark a re-assignment
+            if r.is_definition():
+                new_def_index = r.line
+                continue
+            # mark a del statement
+            # this terminates the scope, I think parso correctly accounts for this
+            elif def_in_del_stmt(r):
+                remove_refs.append(r)
+                new_def_index = r.line
+                continue
+            elif def_in_nl_stmt(r):
+                remove_refs.append(r)
+                continue
             else:
-                break
-        else:
-            refs2.append(r)
+                active_refs.append(r)
 
-    # inlines = [r for r in references
-    #            if (r.line, r.column) != (stmt.line, stmt.column)]
-    inlines = sorted(refs2, key=lambda x: (x.module_path, x.line, x.column),
-                     reverse=True)
+    active_refs = sorted(active_refs, key=lambda x: (x.module_path, x.line, x.column),
+                         reverse=True)
 
-    index = stmt.line - 1
-    line = new_lines[index]
+    return active_refs, remove_refs
 
+
+# TODO error checking/reporting
+# return a string tuple: (insertion_expr, line_without_expr)
+# should trim additional semicolons, commas and whitespace in new line
+# should add necessary parens in insertion_expr
+def _split_insertion_expr(stmt, orig_line):
     # the parent expression of the form "x = expr"
-    assign_stmt = stmt._name.tree_name.parent
+    assign_stmt = stmt._name.tree_name.get_definition()
+    lhs = assign_stmt.children[0]
+    rhs = assign_stmt.get_rhs()
 
     if len(stmt._name.assignment_indexes()) > 0:
-        # the same as parso.tree.search_ancestor()
-        while assign_stmt.type != 'expr_stmt':
-            assign_stmt = assign_stmt.parent
+        # TODO needs to be recursive to support e.g. (a, (b, c)) = (1, (2,3))
+        # TODO what about (a, (b, c)) = e?
+        for n, e in zip(lhs.children, rhs.children):
+            if n.value != ',' and n.start_pos == stmt._name.start_pos:
+                replace_expr = e
 
-        expr_tree = assign_stmt.get_rhs()
-        replace_str = expr_tree.get_code(include_prefix=False)
+        # see jedi.inference.value.iterable.unpack_tuple_to_dict !!!
+        # no, seems to use type context
+
+        line = _cut_with_delim(orig_line, replace_expr.start_pos[1], replace_expr.end_pos[1], ',')
+        line = _cut_with_delim(line, stmt._name.tree_name.start_pos[1], stmt._name.tree_name.end_pos[1], ',')
+    elif len(assign_stmt.get_defined_names()) > 1:
+        # of the form a = b = e
+        replace_expr = rhs
+        name_stmt = stmt._name.tree_name
+        line = _cut_with_delim(orig_line, name_stmt.start_pos[1], name_stmt.end_pos[1], '=')
+        # import pdb; pdb.set_trace()
     else:
-        expr_tree = assign_stmt.children[2]
-        replace_str = expr_tree.get_code(include_prefix=False)
+        # simple case
+        replace_expr = rhs
+        # as the whole expr_stmt is to be removed, check for statement after semicolon
+        line = _cut_with_delim(orig_line, assign_stmt.start_pos[1], assign_stmt.end_pos[1], ';')
+        # TODO: what about multiline?
 
+    replace_str = replace_expr.get_code(include_prefix=False)
     # tuples and lambdas need parentheses
-    if (expr_tree.type == 'testlist_star_expr' or
-        expr_tree.type == 'lambdef' or
-        expr_tree.type == 'lambdef_nocond'):
+    if (replace_expr.type == 'testlist_star_expr' or
+        replace_expr.type == 'lambdef' or
+        replace_expr.type == 'lambdef_nocond'):
         if replace_str[0] not in ['(', '[', '{']:
             replace_str = '(%s)' % replace_str
 
-    # TODO eliminate del, nonlocal
+    return replace_str, line
 
-    # if len(stmt.get_defined_names()) == 1:
-    #     line = line[:stmt.start_pos[1]] + line[stmt.end_pos[1]:]
 
-    line_prefix = line[:assign_stmt.start_pos[1]]
-    line_suffix = line[assign_stmt.end_pos[1]:].strip()
+def _cut_with_delim(s, start, end, delim):
+    """
+    Remove [start:end] from s, consuming trailing delim if present.
+    """
+    prefix = s[:start]
+    suffix = s[end:].strip()
 
-    if line_suffix and line_suffix[0] == ';':
-        line_suffix = line_suffix[1:].strip()
-    line = line_prefix + line_suffix
+    if suffix and suffix[0] == delim:
+        suffix = suffix[1:].strip()
 
-    dct = _rename(inlines, replace_str)
+    return prefix + suffix
+
+
+def _cleanup_after_insertion(replaced_lines, line_residue, index, remove_refs):
+
     # remove the empty line
-    new_lines = dct[script.path][2]
-    if line.strip():
-        new_lines[index] = line
-    else:
-        new_lines.pop(index)
+    # new_lines = replaced_lines
 
-    return Refactoring(dct)
+    # # if line is non-empty after extraction
+    # if line_residue.strip():
+    #     # replace it with that
+    #     new_lines[index] = line_residue
+    # else:
+    #     # otherwise remove
+    #     new_lines.pop(index)
+    # import pdb; pdb.set_trace()
+
+    remove_indices = {x.line - 1 for x in remove_refs}
+    result = []
+    for i, line in enumerate(replaced_lines):
+        if i == index:
+            if line_residue.strip():
+                result.append(line_residue)
+            else:
+                continue
+        elif i not in remove_indices:
+            result.append(line)
+
+    return result
