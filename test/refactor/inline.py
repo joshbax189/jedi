@@ -196,3 +196,13 @@ def f():
 aaa
 aaa
 """ + "z"
+# --- multiline statment
+def f():
+    x = 1 + 2 + 3 + \
+        4 + 5 + 6; y = 5
+    return (x) + y
+# +++
+def f():
+    y = 5
+    return (1 + 2 + 3 + \
+            4 + 5 + 6) + y

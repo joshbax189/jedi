@@ -29,12 +29,18 @@ class Refactoring(object):
         self.change_dct = change_dct
 
     def old_files(self):
+        """
+        :returns dict(old_path=old_file_string)
+        """
         dct = {}
         for old_path, (new_path, old_l, new_l) in self.change_dct.items():
             dct[old_path] = '\n'.join(old_l)
         return dct
 
     def new_files(self):
+        """
+        :returns dict(new_path=new_file_string)
+        """
         dct = {}
         for old_path, (new_path, old_l, new_l) in self.change_dct.items():
             dct[new_path] = '\n'.join(new_l)
@@ -51,9 +57,15 @@ class Refactoring(object):
         return '\n'.join(texts)
 
     def new_lines(self, old_path):
+        """
+        :returns updated list of lines for file at old_path
+        """
         return self.change_dct[old_path][2]
 
     def set_new_lines(self, path, updates):
+        """
+        Replace new_lines at path with updates.
+        """
         self.change_dct[path] = (self.change_dct[path][0], self.change_dct[path][1], updates)
 
 
@@ -172,48 +184,55 @@ def unpack(script, line=None, column=None):
     pass
 
 
+# TODO use consistent names
+# TODO look for similar functions to reuse
+# TODO error checking:
+#      definition contains a *
+#      definition contains a non-simple unpacking
 def inline(script, line=None, column=None):
     """
     Replace a variable with its definition
     :type script: api.Script
+    :rtype: :class:`Refactoring`
     """
-    new_lines = split_lines(python_bytes_to_unicode(script._code))
 
+    # Find any relevant definitions/uses
+    # Get a ValueError if pos is not valid
     definitions = script.goto(line, column)
-    assert len(definitions) == 1
 
+    if definitions == []:
+        raise ValueError('No definition found at '+(line, column))
+
+    # aka the definition statement to be replaced
+    # type: 'api.classes.Definition'
     stmt = definitions[0]
-    assert stmt.type == 'statement'
 
-    # TODO disallow keywords, methods here?
+    # e.g. def f() is a definition but not a statement
+    # stmt.is_definition true, stmt.type != statement
+    if stmt.type != 'statement':
+        raise ValueError('Not a statement')
+
     # TODO disallow * replacements
 
-    # TODO
-    # don't allow multi-line refactorings for now.
-    # assert stmt.start_pos[0] == stmt.end_pos[0] # TODO
-
-    # Examples include, multiline lists, dicts, statement continuations or parens.
-
+    # Definitions divided into those to replace within and those to remove.
     targets, remove = _target_definitions(script, stmt)
 
+    # By convention lines are numbered from 1
     stmt_index = stmt.line - 1
-
+    new_lines = split_lines(python_bytes_to_unicode(script._code))
+    # Split the line into assignment and residue
+    # E.g. a, b = 1, 2 --> a = 1, b = 2
     replace_str, line = _split_insertion_expr(stmt, new_lines[stmt_index])
 
+    # Perform replacements
     dct = Refactoring(_rename(targets, replace_str))
 
-    # remove the empty line
-    # new_lines = dct.new_lines(script.path)
+    stmt_end_index = stmt._name.tree_name.parent.end_pos[0] - 1
 
-    # if line.strip():
-    #     new_lines[stmt_index] = line
-    # else:
-    #     new_lines.pop(stmt_index)
-    # if stmt_index == 156:
-    #     import pdb; pdb.set_trace()
-
+    # Remove everything in remove, replace with line residue from above.
     dct.set_new_lines(script.path,
-                      _cleanup_after_insertion(dct.new_lines(script.path), line, stmt_index, remove))
+                      _cleanup_after_insertion(dct.new_lines(script.path), line, stmt_index, remove,
+                                               stmt_end_index))
     return dct
 
 
@@ -236,6 +255,7 @@ def _target_definitions(script, stmt):
 
     active_refs = []
     remove_refs = []
+
     new_def_index = 0
     seen_original_stmt = False
     for r in references:
@@ -253,14 +273,14 @@ def _target_definitions(script, stmt):
 
         # In active scope of definition
         if seen_original_stmt:
-            # mark a re-assignment
-            if r.is_definition():
-                new_def_index = r.line
-                continue
             # mark a del statement
             # this terminates the scope, I think parso correctly accounts for this
-            elif def_in_del_stmt(r):
+            if def_in_del_stmt(r):
                 remove_refs.append(r)
+                new_def_index = r.line
+                continue
+            # mark a re-assignment
+            elif r.is_definition():
                 new_def_index = r.line
                 continue
             elif def_in_nl_stmt(r):
@@ -275,7 +295,6 @@ def _target_definitions(script, stmt):
     return active_refs, remove_refs
 
 
-# TODO error checking/reporting
 # return a string tuple: (insertion_expr, line_without_expr)
 # should trim additional semicolons, commas and whitespace in new line
 # should add necessary parens in insertion_expr
@@ -284,6 +303,11 @@ def _split_insertion_expr(stmt, orig_line):
     assign_stmt = stmt._name.tree_name.get_definition()
     lhs = assign_stmt.children[0]
     rhs = assign_stmt.get_rhs()
+
+    is_multiline = assign_stmt.end_pos[0] != assign_stmt.start_pos[0]
+
+    # if stmt.line == 179:
+    #     import pdb; pdb.set_trace()
 
     if len(stmt._name.assignment_indexes()) > 0:
         # TODO needs to be recursive to support e.g. (a, (b, c)) = (1, (2,3))
@@ -302,19 +326,18 @@ def _split_insertion_expr(stmt, orig_line):
         replace_expr = rhs
         name_stmt = stmt._name.tree_name
         line = _cut_with_delim(orig_line, name_stmt.start_pos[1], name_stmt.end_pos[1], '=')
-        # import pdb; pdb.set_trace()
+    elif is_multiline:
+        replace_expr = rhs
+        line = ''
     else:
         # simple case
         replace_expr = rhs
         # as the whole expr_stmt is to be removed, check for statement after semicolon
         line = _cut_with_delim(orig_line, assign_stmt.start_pos[1], assign_stmt.end_pos[1], ';')
-        # TODO: what about multiline?
 
     replace_str = replace_expr.get_code(include_prefix=False)
     # tuples and lambdas need parentheses
-    if (replace_expr.type == 'testlist_star_expr' or
-        replace_expr.type == 'lambdef' or
-        replace_expr.type == 'lambdef_nocond'):
+    if replace_expr.type in ['testlist_star_expr', 'lambdef', 'lambdef_nocond']:
         if replace_str[0] not in ['(', '[', '{']:
             replace_str = '(%s)' % replace_str
 
@@ -324,29 +347,21 @@ def _split_insertion_expr(stmt, orig_line):
 def _cut_with_delim(s, start, end, delim):
     """
     Remove [start:end] from s, consuming trailing delim if present.
+    :rtype: String
     """
     prefix = s[:start]
     suffix = s[end:].strip()
 
-    if suffix and suffix[0] == delim:
-        suffix = suffix[1:].strip()
+    if suffix:
+        if suffix[0] == delim:
+            suffix = suffix[1:].strip()
+        else:
+            assert suffix[0].isspace(), 'Split at non-whitespace char'
 
     return prefix + suffix
 
 
-def _cleanup_after_insertion(replaced_lines, line_residue, index, remove_refs):
-
-    # remove the empty line
-    # new_lines = replaced_lines
-
-    # # if line is non-empty after extraction
-    # if line_residue.strip():
-    #     # replace it with that
-    #     new_lines[index] = line_residue
-    # else:
-    #     # otherwise remove
-    #     new_lines.pop(index)
-    # import pdb; pdb.set_trace()
+def _cleanup_after_insertion(replaced_lines, line_residue, index, remove_refs, index_end):
 
     remove_indices = {x.line - 1 for x in remove_refs}
     result = []
@@ -356,6 +371,9 @@ def _cleanup_after_insertion(replaced_lines, line_residue, index, remove_refs):
                 result.append(line_residue)
             else:
                 continue
+        elif index < i and i <= index_end:
+            # drop all parts of a multiline statment
+            continue
         elif i not in remove_indices:
             result.append(line)
 
