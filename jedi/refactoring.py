@@ -187,7 +187,6 @@ def unpack(script, line=None, column=None):
 # TODO use consistent names
 # TODO look for similar functions to reuse
 # TODO error checking:
-#      definition contains a *
 #      definition contains a non-simple unpacking
 def inline(script, line=None, column=None):
     """
@@ -211,8 +210,6 @@ def inline(script, line=None, column=None):
     # stmt.is_definition true, stmt.type != statement
     if stmt.type != 'statement':
         raise ValueError('Not a statement')
-
-    # TODO disallow * replacements
 
     # Definitions divided into those to replace within and those to remove.
     targets, remove = _target_definitions(script, stmt)
@@ -310,11 +307,13 @@ def _split_insertion_expr(stmt, orig_line):
     #     import pdb; pdb.set_trace()
 
     if len(stmt._name.assignment_indexes()) > 0:
-        # TODO needs to be recursive to support e.g. (a, (b, c)) = (1, (2,3))
         # TODO what about (a, (b, c)) = e?
-        for n, e in zip(lhs.children, rhs.children):
-            if n.value != ',' and n.start_pos == stmt._name.start_pos:
-                replace_expr = e
+
+        if '*' in lhs.get_code():
+            # import pdb; pdb.set_trace()
+            raise ValueError('Cannot inline in the presence of a star expr')
+
+        replace_expr = _flatten_packed_assign(lhs.children, rhs.children, stmt._name.start_pos)
 
         # see jedi.inference.value.iterable.unpack_tuple_to_dict !!!
         # no, seems to use type context
@@ -344,6 +343,21 @@ def _split_insertion_expr(stmt, orig_line):
     return replace_str, line
 
 
+# args list of parso.python.tree.Name, Operator, Value, Expr
+# return expr from rhs that is assigned to target_col
+def _flatten_packed_assign(lhs, rhs, target_pos):
+    if len(lhs) != len(rhs):
+        raise ValueError('Could not unpack assignment')
+
+    for l, r in zip(lhs, rhs):
+        if l.start_pos == target_pos:
+            return r
+        elif l.start_pos[1] > target_pos[1]:
+            return _flatten_packed_assign(l.children, r.children, target_pos)
+
+    raise ValueError('Could not unpack assignment')
+
+
 def _cut_with_delim(s, start, end, delim):
     """
     Remove [start:end] from s, consuming trailing delim if present.
@@ -361,17 +375,17 @@ def _cut_with_delim(s, start, end, delim):
     return prefix + suffix
 
 
-def _cleanup_after_insertion(replaced_lines, line_residue, index, remove_refs, index_end):
+def _cleanup_after_insertion(replaced_lines, line_residue, line_index, remove_refs, index_end):
 
     remove_indices = {x.line - 1 for x in remove_refs}
     result = []
     for i, line in enumerate(replaced_lines):
-        if i == index:
+        if i == line_index:
             if line_residue.strip():
                 result.append(line_residue)
             else:
                 continue
-        elif index < i and i <= index_end:
+        elif line_index < i and i <= index_end:
             # drop all parts of a multiline statment
             continue
         elif i not in remove_indices:
