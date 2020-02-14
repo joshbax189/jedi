@@ -186,11 +186,13 @@ def unpack(script, line=None, column=None):
 
 # TODO use consistent names
 # TODO look for similar functions to reuse
-# TODO error checking:
-#      definition contains a non-simple unpacking
 def inline(script, line=None, column=None):
     """
-    Replace a variable with its definition
+    Replace a variable with its definition.
+    This only has effect until the selected variable is reassigned.
+
+    Any uses of `del` and `nonlocal` that refer to the inlined variable are removed.
+
     :type script: api.Script
     :rtype: :class:`Refactoring`
     """
@@ -201,25 +203,34 @@ def inline(script, line=None, column=None):
 
     if definitions == []:
         raise ValueError('No definition found at '+(line, column))
+    elif len(definitions) > 1:
+        raise ValueError('Could not resolve definition at '+(line, column))
 
     # aka the definition statement to be replaced
     # type: 'api.classes.Definition'
+    # Note that this is not necessarily the original definition
+    # It is just the statement targeted by line/column
     stmt = definitions[0]
 
     # e.g. def f() is a definition but not a statement
     # stmt.is_definition true, stmt.type != statement
     if stmt.type != 'statement':
         raise ValueError('Not a statement')
+    # TODO this would force the user to select only definitions
+    # assert stmt.is_definition()
+
+    # TODO can the references be across multiple files?
 
     # Definitions divided into those to replace within and those to remove.
     targets, remove = _target_definitions(script, stmt)
 
     # By convention lines are numbered from 1
     stmt_index = stmt.line - 1
+    # TODO: should use script._code_lines?
     new_lines = split_lines(python_bytes_to_unicode(script._code))
     # Split the line into assignment and residue
     # E.g. a, b = 1, 2 --> a = 1, b = 2
-    replace_str, line = _split_insertion_expr(stmt, new_lines[stmt_index])
+    replace_str, line_residue = _split_insertion_expr(stmt, new_lines[stmt_index])
 
     # Perform replacements
     dct = Refactoring(_rename(targets, replace_str))
@@ -228,7 +239,7 @@ def inline(script, line=None, column=None):
 
     # Remove everything in remove, replace with line residue from above.
     dct.set_new_lines(script.path,
-                      _cleanup_after_insertion(dct.new_lines(script.path), line, stmt_index, remove,
+                      _cleanup_after_insertion(dct.new_lines(script.path), line_residue, stmt_index, remove,
                                                stmt_end_index))
     return dct
 
@@ -240,54 +251,54 @@ def _target_definitions(script, stmt):
     The original statement is always in 'remove'.
     """
 
-    # whether a Definition for x is in "del x"
     def def_in_del_stmt(d):
         return d._name.tree_name.parent.type == 'del_stmt'
 
     def def_in_nl_stmt(d):
         return d._name.tree_name.parent.type == 'nonlocal_stmt'
 
-    # assumes that references is in same order as source file
+    # List of references to the chosen name in the same scope
+    # Assumes that references is in same order as source file
     references = script.get_references(stmt.line, stmt.column)
+
+    # Note that stmt.goto should get the correct definition
 
     active_refs = []
     remove_refs = []
 
-    new_def_index = 0
-    seen_original_stmt = False
+    # the line, if any, where original name is re-assigned
+    reassign_line = 0
+    # defined as: between closest assignment/definition of stmt until reassignment or del_stmt.
+    in_active_scope = False
     for r in references:
         # skip to original definition
         # TODO perhaps need to check module name too
         if (r.line, r.column) == (stmt.line, stmt.column):
-            seen_original_stmt = True
+            in_active_scope = True
             remove_refs.append(r)
             continue
 
         # re-assignment may use original expr, e.g. x=x+1
-        # if not, break the loop
-        if new_def_index > 0 and r.line != new_def_index:
+        if reassign_line > 0 and r.line != reassign_line:
             break
 
-        # In active scope of definition
-        if seen_original_stmt:
+        if in_active_scope:
             # mark a del statement
-            # this terminates the scope, I think parso correctly accounts for this
             if def_in_del_stmt(r):
                 remove_refs.append(r)
-                new_def_index = r.line
+                reassign_line = r.line
+                # this terminates the scope, I think parso correctly accounts for this
                 continue
             # mark a re-assignment
             elif r.is_definition():
-                new_def_index = r.line
+                reassign_line = r.line
+                # TODO also handle x+=1 here
                 continue
             elif def_in_nl_stmt(r):
                 remove_refs.append(r)
                 continue
             else:
                 active_refs.append(r)
-
-    active_refs = sorted(active_refs, key=lambda x: (x.module_path, x.line, x.column),
-                         reverse=True)
 
     return active_refs, remove_refs
 
@@ -303,17 +314,12 @@ def _split_insertion_expr(stmt, orig_line):
 
     is_multiline = assign_stmt.end_pos[0] != assign_stmt.start_pos[0]
 
-    # if stmt.line == 179:
-    #     import pdb; pdb.set_trace()
-
     if len(stmt._name.assignment_indexes()) > 0:
-        # TODO what about (a, (b, c)) = e?
 
         if '*' in lhs.get_code():
-            # import pdb; pdb.set_trace()
             raise ValueError('Cannot inline in the presence of a star expr')
 
-        replace_expr = _flatten_packed_assign(lhs.children, rhs.children, stmt._name.start_pos)
+        replace_expr = _extract_packed_assign(lhs.children, rhs.children, stmt._name.start_pos)
 
         # see jedi.inference.value.iterable.unpack_tuple_to_dict !!!
         # no, seems to use type context
@@ -345,7 +351,7 @@ def _split_insertion_expr(stmt, orig_line):
 
 # args list of parso.python.tree.Name, Operator, Value, Expr
 # return expr from rhs that is assigned to target_col
-def _flatten_packed_assign(lhs, rhs, target_pos):
+def _extract_packed_assign(lhs, rhs, target_pos):
     if len(lhs) != len(rhs):
         raise ValueError('Could not unpack assignment')
 
@@ -353,7 +359,7 @@ def _flatten_packed_assign(lhs, rhs, target_pos):
         if l.start_pos == target_pos:
             return r
         elif l.start_pos[1] > target_pos[1]:
-            return _flatten_packed_assign(l.children, r.children, target_pos)
+            return _extract_packed_assign(l.children, r.children, target_pos)
 
     raise ValueError('Could not unpack assignment')
 
@@ -392,3 +398,14 @@ def _cleanup_after_insertion(replaced_lines, line_residue, line_index, remove_re
             result.append(line)
 
     return result
+
+
+# Candidates for addition to API
+
+def statement_type(definition):
+    return definition._name.tree_name.parent.type
+
+
+def tree_def(definition):
+    # cf definition._name.tree_name
+    return definition._name.tree_name.get_definition()

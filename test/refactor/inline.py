@@ -1,3 +1,28 @@
+# --- for loop counter-example
+def f():
+    #? 8
+    for i in range(1,5):
+        print(i)
+# +++
+def f():
+    for i in range(1,5):
+        print(i)
+# --- name capture counter-example
+def f(y):
+    #? 4
+    x = y + 1
+    def g():
+        y = -1
+        print(x)
+        print(y)
+    return x
+# +++
+def f(y):
+    def g():
+        y = -1
+        print(y + 1)
+        print(y)
+    return y + 1
 # --- simple
 def test():
     #? 4
@@ -125,7 +150,19 @@ def test():
 def test():
     x = 0
     return f(x + 1)
-
+# --- multi use 3
+def f():
+    #? 4
+    x = 0
+    print(x)
+    x += 1
+    return x
+# +++
+def f():
+    x = 0
+    print(0)
+    x += 1
+    return x
 # --- existence of del x
 def f():
     #? 4
