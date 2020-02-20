@@ -18,7 +18,7 @@ following functions (sometimes bug-prone):
 import difflib
 
 from parso import python_bytes_to_unicode, split_lines
-from jedi.inference import helpers
+from parso.tree import search_ancestor
 
 
 class Refactoring(object):
@@ -114,67 +114,99 @@ def _rename(names, replace_str):
     return dct
 
 
-def extract(script, new_name):
-    """ The `args` / `kwargs` params are the same as in `api.Script`.
-    :param operation: The refactoring operation to execute.
-    :type operation: str
-    :type source: str
-    :return: list of changed lines/changed files
+# TODO How should user specify expression with just one position?
+def extract(script, new_name, line=None, column=None, end_line=None, end_column=None):
+    """ Extract an expression to a variable.
     """
-    new_lines = split_lines(python_bytes_to_unicode(script.source))
+
+    new_lines = split_lines(python_bytes_to_unicode(script._code))
     old_lines = new_lines[:]
-
-    user_stmt = script._parser.user_stmt()
-
-    # TODO care for multi-line extracts
     dct = {}
-    if user_stmt:
-        pos = script._pos
-        line_index = pos[0] - 1
-        # Be careful here. 'array_for_pos' does not exist in 'helpers'.
-        arr, index = helpers.array_for_pos(user_stmt, pos)
-        if arr is not None:
-            start_pos = arr[index].start_pos
-            end_pos = arr[index].end_pos
 
-            # take full line if the start line is different from end line
-            e = end_pos[1] if end_pos[0] == start_pos[0] else None
-            start_line = new_lines[start_pos[0] - 1]
-            text = start_line[start_pos[1]:e]
-            for l in range(start_pos[0], end_pos[0] - 1):
-                text += '\n' + str(l)
-            if e is None:
-                end_line = new_lines[end_pos[0] - 1]
-                text += '\n' + end_line[:end_pos[1]]
+    target = _find_sub_expr(script, line, column, end_line, end_column)
 
-            # remove code from new lines
-            t = text.lstrip()
-            del_start = start_pos[1] + len(text) - len(t)
+    cut_start_pos = target.start_pos
+    cut_end_pos = target.end_pos
 
-            text = t.rstrip()
-            del_end = len(t) - len(text)
-            if e is None:
-                new_lines[end_pos[0] - 1] = end_line[end_pos[1] - del_end:]
-                e = len(start_line)
-            else:
-                e = e - del_end
-            start_line = start_line[:del_start] + new_name + start_line[e:]
-            new_lines[start_pos[0] - 1] = start_line
-            new_lines[start_pos[0]:end_pos[0] - 1] = []
+    line_index = line - 1
+    start_code = new_lines[line_index]
 
-            # add parentheses in multi-line case
-            open_brackets = ['(', '[', '{']
-            close_brackets = [')', ']', '}']
-            if '\n' in text and not (text[0] in open_brackets and text[-1]
-                                     == close_brackets[open_brackets.index(text[0])]):
-                text = '(%s)' % text
+    is_multiline = cut_start_pos[0] != cut_end_pos[0]
 
-            # add new line before statement
-            indent = user_stmt.start_pos[1]
-            new = "%s%s = %s" % (' ' * indent, new_name, text)
-            new_lines.insert(line_index, new)
+    if not is_multiline:
+        text = start_code[cut_start_pos[1]:cut_end_pos[1]]
+        start_code = start_code[:cut_start_pos[1]] + new_name + start_code[cut_end_pos[1]:]
+        new_lines[line_index] = start_code
+    else:
+        text = start_code[cut_start_pos[1]:]
+        for l in range(cut_start_pos[0], cut_end_pos[0] - 1):
+            text += '\n' + new_lines[l]
+
+        end_code = new_lines[cut_end_pos[0] - 1]
+        text += '\n' + end_code[:cut_end_pos[1]]
+        new_lines[cut_end_pos[0] - 1] = end_code[cut_end_pos[1]:]
+
+    # add parentheses in multi-line case
+    open_brackets = ['(', '[', '{']
+    close_brackets = [')', ']', '}']
+
+    if '\n' in text and not (text[0] in open_brackets and text[-1]
+                             == close_brackets[open_brackets.index(text[0])]):
+        text = '(%s)' % text
+
+    # add new line before statement
+    indent = len(start_code) - len(start_code.lstrip())
+    new = "%s%s = %s" % (' ' * indent, new_name, text)
+    new_lines.insert(line_index, new)
+
     dct[script.path] = script.path, old_lines, new_lines
     return Refactoring(dct)
+
+
+def _find_sub_expr(script, line=None, column=None, end_line=None, end_column=None):
+    # Find maximal (closest to root) sub-expression between the two positions satisfying:
+    # it is assignable (exclude x = y)
+    # it can be substituted for (func call f>(x)< should not become fy)
+    # it does not contain anything BEFORE the first position (e.g. (>x + y)< becomes (z))
+    # CE: a > + b + c</ should this extract a + b + c or b + c?
+    # a None end pos is treated as EOL
+    # it has balanced parens, quotes
+
+    # Multiline?
+    # Can it return a list of targets?
+    # e.g. x, >y, z< or a + > b + c <
+
+    def pos_in_node(n, pos):
+        return n.start_pos <= pos and pos <= n.end_pos
+
+    # defines assignable
+    def cut_eligible(n):
+        return n.type not in ['operator', 'trailer', 'expr_stmt']
+
+    start_leaf = script._module_node.get_leaf_for_position((line, column))
+    target = start_leaf
+
+    import pdb; pdb.set_trace()
+
+    start_pos = start_leaf.start_pos #(line, column)
+
+    if end_line is not None and \
+       end_column is not None:
+        end_pos = (end_line, end_column)
+
+        while not pos_in_node(target, end_pos):
+            target = target.parent
+    else:
+        while target:
+            if target.parent is None or start_pos >= target.parent.start_pos or not cut_eligible(target.parent):
+                if cut_eligible(target):
+                    break
+                else:
+                    target = start_leaf.get_next_sibling()
+            else:
+                target = target.parent
+
+    return target
 
 
 # Convert a definition a,b,c = e into the equivalent
@@ -226,11 +258,10 @@ def inline(script, line=None, column=None):
 
     # By convention lines are numbered from 1
     stmt_index = stmt.line - 1
-    # TODO: should use script._code_lines?
-    new_lines = split_lines(python_bytes_to_unicode(script._code))
+
     # Split the line into assignment and residue
     # E.g. a, b = 1, 2 --> a = 1, b = 2
-    replace_str, line_residue = _split_insertion_expr(stmt, new_lines[stmt_index])
+    replace_str, line_residue = _split_insertion_expr(stmt, script._code_lines[stmt_index])
 
     # Perform replacements
     dct = Refactoring(_rename(targets, replace_str))
