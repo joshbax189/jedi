@@ -1,12 +1,12 @@
 # --- simple
 def test():
-    #? 6 y
-    x = a + b
+    #? 8 y
+    x = (a + 1) + b + f(c + 1)
     return x
 
 # +++
 def test():
-    y = a + b
+    y = (a + 1) + b + f(c + 1)
     x = y
     return x
 

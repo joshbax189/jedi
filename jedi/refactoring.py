@@ -114,11 +114,11 @@ def _rename(names, replace_str):
     return dct
 
 
-# TODO How should user specify expression with just one position?
 def extract(script, new_name, line=None, column=None, end_line=None, end_column=None):
     """ Extract an expression to a variable.
+    Expressions are selected by marking start and end positions.
+    If no end mark is given, it is treated as EOL, which usually means select the entire expression.
     """
-
     new_lines = split_lines(python_bytes_to_unicode(script._code))
     old_lines = new_lines[:]
     dct = {}
@@ -207,6 +207,65 @@ def _find_sub_expr(script, line=None, column=None, end_line=None, end_column=Non
                 target = target.parent
 
     return target
+
+
+def get_sub_positions(script, line, column=None, include_names=True):
+    # Return a list of start + end positions defining sub expressions of the given expression
+    # Use for selecting a sub expression for extraction
+    # Typically expect 'x = e' type expressions
+    # include_names => whether to report single names
+
+    # x = >(a + b) + f(x + 1)
+    # (a + b) + f(x + 1)
+    # (a + b)
+    # a
+
+    # x = (a + b) >+ f(x + 1)
+    # f(x + 1)
+    # f
+
+    # case: x, *y, z = e
+    # case: multiline
+    # case: [el]if (a and b) ...
+    # case: for x,y,z in e:
+
+    def eligible(n):
+        return n.type not in ['operator', 'trailer', 'expr_stmt', 'keyword']
+
+    # TODO
+    if column is None:
+        raise ValueError('Not Handled')
+
+    # Find the target position
+    start_leaf = script._module_node.get_leaf_for_position((line, column))
+    target = start_leaf
+
+    # case: pos on an opening paren or keyword
+    while not eligible(target):
+        try:
+            target = target.get_next_sibling().get_first_leaf()
+        except AttributeError:
+            raise ValueError('No expression found')
+
+    res = []
+
+    # Traverse to the root recording eligible positions
+    start_pos = (line, column)
+
+    while target:
+        if include_names or target.type != 'name':
+            res += (target.start_pos, target.end_pos, target.get_code())
+
+        if target.parent is None or start_pos > target.parent.start_pos or \
+           not eligible(target.parent):
+            if eligible(target):
+                break
+            else:
+                target = start_leaf.get_next_sibling()
+        else:
+            target = target.parent
+
+    return res
 
 
 # Convert a definition a,b,c = e into the equivalent
