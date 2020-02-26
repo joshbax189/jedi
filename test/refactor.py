@@ -73,11 +73,24 @@ class RefactoringCase(object):
     def check(self):
         return self.run() == self.desired
 
+    def is_exception(self):
+        return self.desired.startswith('#^')
+
+    def exception_name(self):
+        if self.is_exception:
+            r = r'^#\^\W+([^\n]*)'
+            match = re.match(r, self.desired)
+            return match.group(1).strip()
+        else:
+            return None
+
     def __repr__(self):
         return '<%s: %s:%s>' % (self.__class__.__name__,
                                 self.name, self.line_nr - 1)
 
 
+# This looks in source files for test operators:
+# --- defines a case, then +++ defines the expected result.
 def collect_file_tests(source, path, lines_to_execute):
     r = r'^# --- ?([^\n]*)\n((?:(?!\n# \+\+\+).)*)' \
         r'\n# \+\+\+((?:(?!\n# ---).)*)'

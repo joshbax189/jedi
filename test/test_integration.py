@@ -20,6 +20,14 @@ desired = %s
 """ % (case, actual, desired)
 
 
+def assert_case_raises(case, exception):
+    assert exception.__class__.__name__ == case.exception_name(), """
+Test %r failed.
+Expected: %s
+Actual: %s: %s
+""" % (case, case.exception_name(), exception.__class__.__name__, exception)
+
+
 def assert_static_analysis(case, actual, desired):
     """A nicer formatting for static analysis tests."""
     a = set(actual)
@@ -58,9 +66,16 @@ def test_refactor(refactor_case):
 
     :type refactor_case: :class:`.refactor.RefactoringCase`
     """
-    if 0:
+    if 1:
         # TODO Refactoring is not relevant at the moment, it will be changed
         # significantly in the future, but maybe we can use these tests:
-        refactor_case.run()
-        assert_case_equal(refactor_case,
-                          refactor_case.result, refactor_case.desired)
+        if refactor_case.is_exception():
+            try:
+                refactor_case.run()
+                assert False, 'Did not raise %s' % refactor_case.exception_name()
+            except Exception as e:
+                assert_case_raises(refactor_case, e)
+        else:
+            refactor_case.run()
+            assert_case_equal(refactor_case,
+                              refactor_case.result, refactor_case.desired)

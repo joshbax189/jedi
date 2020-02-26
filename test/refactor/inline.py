@@ -4,9 +4,8 @@ def f():
     for i in range(1,5):
         print(i)
 # +++
-def f():
-    for i in range(1,5):
-        print(i)
+#^ ValueError
+
 # --- name capture counter-example
 def f(y):
     #? 4
@@ -96,7 +95,7 @@ def test():
     return f(a, b, c, 1)
 # +++
 def test():
-    b, c = 2, 3
+    (b, c) = (2, 3)
     return f(1, b, c, 1)
 
 # --- nested tuple assignment 2
@@ -108,6 +107,22 @@ def test():
 def test():
     a, b = 1, 2
     return f(a, b, 3, 1)
+
+# --- failing tuple assignment
+def test():
+    #? 8
+    a, (b, c) = [0] ^ 3
+    return f(a, b, c, 1)
+# +++
+#^ ValueError
+
+# --- failing tuple assignment 2
+def test():
+    #? 4
+    a, *b, c = [0] ^ 5
+    return f(a, b, c, 1)
+# +++
+#^ ValueError
 
 # --- multi assignment
 def test():
@@ -233,7 +248,7 @@ def f():
 aaa
 aaa
 """ + "z"
-# --- multiline statment
+# --- multiline statement
 def f():
     x = 1 + 2 + 3 + \
         4 + 5 + 6; y = 5
