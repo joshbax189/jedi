@@ -1,4 +1,4 @@
-# --- simple
+# --- Default to end of line
 def test():
     #? 8 y
     x = (a + 1) + b + f(c + 1)
@@ -12,7 +12,7 @@ def test():
 
 # --- specify both points
 def test():
-    #? 6 y 16 9
+    #? 8 y 9
     x = a + b
     return x
 
@@ -22,7 +22,7 @@ def test():
     x = y + b
     return x
 
-# --- simple
+# --- Default to end of line 2
 def test():
     #? 11 a
     return f(x + 1)
@@ -32,9 +32,9 @@ def test():
     a = f(x + 1)
     return a
 
-# --- simple
+# --- Sub expr
 def test():
-    #? 35 a
+    #? 35 a 36
     return test(100, (30 + b, c) + 1)
 
 # +++
@@ -45,7 +45,7 @@ def test():
 
 # --- simple #2
 def test():
-    #? 22 a
+    #? 22 a 28
     return test(100, (30 + b, c) + 1)
 
 # +++
@@ -53,6 +53,15 @@ def test():
     a = 30 + b
     return test(100, (a, c) + 1)
 
+# --- function args
+def test():
+    #? 16 a 22
+    return test((0, 1))
+
+# +++
+def test():
+    a = (0, 1)
+    return test(a)
 
 # --- multiline
 def test():
