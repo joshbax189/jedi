@@ -282,12 +282,16 @@ def inline(script, line=None, column=None):
 
     Any uses of `del` and `nonlocal` that refer to the inlined variable are removed.
 
+    This cannot be used to inline default values for function parameters.
+
     :type script: api.Script
     :rtype: :class:`Refactoring`
     """
 
-    # Find any relevant definitions/uses
-    # Get a ValueError if pos is not valid
+    def can_inline(definition):
+        return search_ancestor(definition._name.tree_name, 'expr_stmt') is not None
+
+    # Raises ValueError if position is invalid
     definitions = script.goto(line, column)
 
     if definitions == []:
@@ -297,31 +301,30 @@ def inline(script, line=None, column=None):
 
     # aka the definition statement to be replaced
     # type: 'api.classes.Definition'
-    # Note that this is not necessarily the original definition
-    # It is just the statement targeted by line/column
     stmt = definitions[0]
 
-    # e.g. def f() is a definition but not a statement
-    # stmt.is_definition true, stmt.type != statement
-    if stmt.type != 'statement':
-        raise ValueError('Not a statement')
+    if not can_inline(stmt):
+        raise ValueError('Not eligible for inline')
+
     # TODO this would force the user to select only definitions
+    # i.e. you can't select x in (x + 7) to inline the definition of x
     # assert stmt.is_definition()
 
     # TODO can the references be across multiple files?
 
-    # Definitions divided into those to replace within and those to remove.
-    targets, remove = _target_definitions(script, stmt)
-
     # By convention lines are numbered from 1
     stmt_index = stmt.line - 1
+    stmt_code = script._code_lines[stmt_index]
 
     # Split the line into assignment and residue
     # E.g. a, b = 1, 2 --> a = 1, b = 2
-    replace_str, line_residue = _split_insertion_expr(stmt, script._code_lines[stmt_index])
+    replace_expr, line_residue = _split_insertion_expr(stmt, stmt_code)
 
-    # Perform replacements
-    dct = Refactoring(_rename(targets, replace_str))
+    # Definitions divided into those to replace within and those to remove.
+    targets, remove = _target_definitions(script, stmt, line, column)
+
+    # Perform replacements and convert to Refactoring object
+    dct = Refactoring(_rename(targets, replace_expr))
 
     stmt_end_index = stmt._name.tree_name.parent.end_pos[0] - 1
 
@@ -332,7 +335,7 @@ def inline(script, line=None, column=None):
     return dct
 
 
-def _target_definitions(script, stmt):
+def _target_definitions(script, stmt, line, column):
     """
     :returns A pair of Definition lists (replace, remove), where replace should be replaced with
     the inlining expression, and remove should be removed from the final result.
@@ -340,16 +343,14 @@ def _target_definitions(script, stmt):
     """
 
     def def_in_del_stmt(d):
-        return d._name.tree_name.parent.type == 'del_stmt'
+        return definition_name_is_in(d, 'del_stmt')
 
     def def_in_nl_stmt(d):
-        return d._name.tree_name.parent.type == 'nonlocal_stmt'
+        return definition_name_is_in(d, 'nonlocal_stmt')
 
     # List of references to the chosen name in the same scope
     # Assumes that references is in same order as source file
-    references = script.get_references(stmt.line, stmt.column)
-
-    # Note that stmt.goto should get the correct definition
+    references = script.get_references(line, column)
 
     active_refs = []
     remove_refs = []
@@ -490,6 +491,10 @@ def _cleanup_after_insertion(replaced_lines, line_residue, line_index, remove_re
 
 
 # Candidates for addition to API
+
+def definition_name_is_in(definition, stmt_type: str):
+    return search_ancestor(definition._name.tree_name, stmt_type) is not None
+
 
 def statement_type(definition):
     return definition._name.tree_name.parent.type
