@@ -186,8 +186,6 @@ def _find_sub_expr(script, line=None, column=None, end_line=None, end_column=Non
     start_leaf = script._module_node.get_leaf_for_position((line, column))
     target = start_leaf
 
-    import pdb; pdb.set_trace()
-
     start_pos = start_leaf.start_pos #(line, column)
 
     if end_line is not None and \
@@ -448,7 +446,7 @@ def _extract_packed_assign(lhs, rhs, target_pos):
     for l, r in zip(lhs, rhs):
         if l.start_pos == target_pos:
             return r
-        elif l.start_pos[1] > target_pos[1]:
+        elif l.end_pos[1] > target_pos[1] and len(l.children) > 0:
             return _extract_packed_assign(l.children, r.children, target_pos)
 
     raise ValueError('Could not unpack assignment')
@@ -466,7 +464,8 @@ def _cut_with_delim(s, start, end, delim):
         if suffix[0] == delim:
             suffix = suffix[1:].strip()
         else:
-            assert suffix[0].isspace(), 'Split at non-whitespace char'
+            assert (suffix[0].isspace() or suffix[0] == ')'), \
+                'Split at non-whitespace char'
 
     return prefix + suffix
 
