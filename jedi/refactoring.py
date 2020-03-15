@@ -275,6 +275,7 @@ def unpack(script, line=None, column=None):
 
 # TODO use consistent names
 # TODO look for similar functions to reuse
+# TODO can the references be across multiple files?
 def inline(script, line=None, column=None):
     """
     Replace a variable with its definition.
@@ -299,18 +300,12 @@ def inline(script, line=None, column=None):
     elif len(definitions) > 1:
         raise ValueError('Could not resolve definition at '+(line, column))
 
-    # aka the definition statement to be replaced
+    # The definition statement to be replaced
     # type: 'api.classes.Definition'
     stmt = definitions[0]
 
     if not can_inline(stmt):
         raise ValueError('Not eligible for inline')
-
-    # TODO this would force the user to select only definitions
-    # i.e. you can't select x in (x + 7) to inline the definition of x
-    # assert stmt.is_definition()
-
-    # TODO can the references be across multiple files?
 
     # By convention lines are numbered from 1
     stmt_index = stmt.line - 1
@@ -318,29 +313,31 @@ def inline(script, line=None, column=None):
 
     # Split the line into assignment and residue
     # E.g. a, b = 1, 2 --> a = 1, b = 2
-    replace_expr, line_residue = _split_insertion_expr(stmt, stmt_code)
+    replace_expr, stmt_residue = _split_insertion_expr(stmt, stmt_code)
 
     # Definitions divided into those to replace within and those to remove.
-    targets, remove = _target_definitions(script, stmt, line, column)
+    targets, special_cases = _target_definitions(script, stmt, line, column, replace_expr)
+
+    # TODO some lines are modified in other ways:
+    # orig_def -> residue [in remove]
+    # targets -> replace(normal_line, expr)
+    # aug_assign -> replace_aug(expr)
+    # del/nonlocal list -> del/nonlocal replace(list, '') [in remove for now]
 
     # Perform replacements and convert to Refactoring object
     dct = Refactoring(_rename(targets, replace_expr))
 
+    # TODO this uses tree_name.parent - is it correct?
     stmt_end_index = stmt._name.tree_name.parent.end_pos[0] - 1
 
+    fixed_lines = _cleanup_after_insertion(dct.new_lines(script.path), stmt_residue, stmt_index, special_cases, stmt_end_index)
+
     # Remove everything in remove, replace with line residue from above.
-    dct.set_new_lines(script.path,
-                      _cleanup_after_insertion(dct.new_lines(script.path), line_residue, stmt_index, remove,
-                                               stmt_end_index))
+    dct.set_new_lines(script.path, fixed_lines)
     return dct
 
 
-def _target_definitions(script, stmt, line, column):
-    """
-    :returns A pair of Definition lists (replace, remove), where replace should be replaced with
-    the inlining expression, and remove should be removed from the final result.
-    The original statement is always in 'remove'.
-    """
+def _target_definitions(script, stmt, line, column, replace_expr):
 
     def def_in_del_stmt(d):
         return definition_name_is_in(d, 'del_stmt')
@@ -348,12 +345,17 @@ def _target_definitions(script, stmt, line, column):
     def def_in_nl_stmt(d):
         return definition_name_is_in(d, 'nonlocal_stmt')
 
+    def def_in_aug_assign(d):
+        expr = d._name.tree_name.get_definition()
+        return (expr.children[1].type == 'operator'
+                and expr.children[1].value != '=')
+
     # List of references to the chosen name in the same scope
     # Assumes that references is in same order as source file
     references = script.get_references(line, column)
 
     active_refs = []
-    remove_refs = []
+    special_case_dct = {}
 
     # the line, if any, where original name is re-assigned
     reassign_line = 0
@@ -364,7 +366,6 @@ def _target_definitions(script, stmt, line, column):
         # TODO perhaps need to check module name too
         if (r.line, r.column) == (stmt.line, stmt.column):
             in_active_scope = True
-            remove_refs.append(r)
             continue
 
         # re-assignment may use original expr, e.g. x=x+1
@@ -372,24 +373,75 @@ def _target_definitions(script, stmt, line, column):
             break
 
         if in_active_scope:
-            # mark a del statement
             if def_in_del_stmt(r):
-                remove_refs.append(r)
+                special_case_dct[r.line - 1] = _handle_del(r)
                 reassign_line = r.line
-                # this terminates the scope, I think parso correctly accounts for this
                 continue
             # mark a re-assignment
             elif r.is_definition():
                 reassign_line = r.line
-                # TODO also handle x+=1 here
+                # handle x+=1 here
+                if def_in_aug_assign(r):
+                    special_case_dct[r.line - 1] = _handle_aug_assign(r, replace_expr)
                 continue
             elif def_in_nl_stmt(r):
-                remove_refs.append(r)
+                special_case_dct[r.line - 1] = _handle_del(r)
                 continue
             else:
                 active_refs.append(r)
 
-    return active_refs, remove_refs
+    return active_refs, special_case_dct
+
+
+def _handle_del(d):
+    # Given a Definition 'del x,y,z' remove the given name and return an updated line string
+    code = d.get_line_code()
+    list_node = d._name.tree_name.parent
+    name = d.name
+    start_col = list_node.start_pos[1]
+    end_col = list_node.end_pos[1]
+    result = None
+
+    if list_node.type == 'exprlist':
+        var_list = code[start_col:end_col].split(',')
+        new_var_list = ','.join([x for x in var_list if x.strip() != name])
+        result = code[:start_col] + new_var_list.lstrip() + code[end_col:]
+    else:
+        result = code[:start_col] + code[end_col:].lstrip()
+
+    return result.rstrip('\n\r')
+
+
+def _handle_aug_assign(d, expr: str):
+    code = d.get_line_code()
+    assign_node = d._name.tree_name.get_definition()
+    op = assign_node.children[1]
+    new_op_str = ' ' + op.value[:-1] + ' '
+    rhs = assign_node.get_rhs()
+    start_col = rhs.start_pos[1]
+    # import pdb; pdb.set_trace()
+
+    # reduced_expr = code
+    # last_ptr = 0
+    # # jfodsa = (d + x + (y / z) - f(x))
+    # for n in _yield_names_in_expr(rhs, d.name):
+    #     s = code[last_ptr:n.start_pos[1]]
+
+    return (code[:op.start_pos[1]] + '= ' + expr + new_op_str + code[start_col:]).rstrip('\n\r')
+
+
+def _yield_names_in_expr(expr, name: str):
+    """ Generator of all Name nodes in expr whose value matches name """
+    leaf = expr.get_first_leaf()
+    last_leaf = expr.get_last_leaf()
+    while True:
+        if leaf.value == name:
+            yield leaf
+
+        if leaf == last_leaf:
+            break
+        else:
+            leaf = leaf.get_next_leaf()
 
 
 # return a string tuple: (insertion_expr, line_without_expr)
@@ -453,10 +505,9 @@ def _extract_packed_assign(lhs, rhs, target_pos):
     raise ValueError('Could not unpack assignment')
 
 
-def _cut_with_delim(s, start, end, delim):
+def _cut_with_delim(s: str, start: int, end: int, delim: str) -> str:
     """
     Remove [start:end] from s, consuming trailing delim if present.
-    :rtype: String
     """
     prefix = s[:start]
     suffix = s[end:].strip()
@@ -471,11 +522,13 @@ def _cut_with_delim(s, start, end, delim):
     return prefix + suffix
 
 
-def _cleanup_after_insertion(replaced_lines, line_residue, line_index, remove_refs, index_end):
+def _cleanup_after_insertion(replaced_lines: [str], line_residue: str, line_index, special_cases,
+                             index_end):
 
-    remove_indices = {x.line - 1 for x in remove_refs}
     result = []
     for i, line in enumerate(replaced_lines):
+        # Orig assignment case
+        # Replace with line residue
         if i == line_index:
             if line_residue.strip():
                 result.append(line_residue)
@@ -484,11 +537,14 @@ def _cleanup_after_insertion(replaced_lines, line_residue, line_index, remove_re
         elif line_index < i and i <= index_end:
             # drop all parts of a multiline statment
             continue
-        elif i not in remove_indices:
+        elif i in special_cases:
+            # TODO what about multiline special cases?
+            if special_cases[i].strip():
+                result.append(special_cases[i])
+        else:
             result.append(line)
 
     return result
-
 
 # Candidates for addition to API
 
@@ -496,6 +552,8 @@ def definition_name_is_in(definition, stmt_type: str):
     return search_ancestor(definition._name.tree_name, stmt_type) is not None
 
 
+# TODO - this only gets the immediate parent node of the NAME
+# This is not the expected behaviour!
 def statement_type(definition):
     return definition._name.tree_name.parent.type
 
