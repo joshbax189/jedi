@@ -76,28 +76,39 @@ def rename(script, new_name, line=None, column=None, **kwargs):
     :param script: The source Script object.
     :return: list of changed lines/changed files
     """
-    return Refactoring(_rename(script.get_references(line, column), new_name))
+    return Refactoring(_rename(script.get_references(line, column), new_name, script._code))
 
 
-def _rename(names, replace_str):
-    """ For both rename and inline. """
-    order = sorted(names, key=lambda x: (x.module_path, x.line, x.column),
-                   reverse=True)
+# TODO special case where rename forces a file rename
+# E.g. by renaming in an import statement
+def _rename(names, replace_str, source=None):
+    """ Replace names in Definitions with a given string, generating a refactoring dict.
+    Used for both rename and inline. There should be one name entry for each occurrence to be
+    replaced.
+    :param list(Definition) names: Occurrences of names to be replaced.
+    :param str replace_str: The string to use for replacement
+    :param str source:
+    :return: a change_dct which can be used to construct a new Refactoring object.
+    """
+
+    # All changes in a given file must be processed together
+    ordered_names = sorted(names, key=lambda x: (x.module_path, x.line, x.column),
+                           reverse=True)
+    change_dct = {}
 
     def process(path, old_lines, new_lines):
         if new_lines is not None:  # goto next file, save last
-            dct[path] = path, old_lines, new_lines
+            change_dct[path] = path, old_lines, new_lines
 
-    dct = {}
     current_path = object()
     new_lines = old_lines = None
-    for name in order:
+    for name in ordered_names:
         if name.in_builtin_module():
             continue
         if current_path != name.module_path:
+            process(current_path, old_lines, new_lines)
             current_path = name.module_path
 
-            process(current_path, old_lines, new_lines)
             if current_path is not None:
                 # None means take the source that is a normal param.
                 with open(current_path) as f:
@@ -110,8 +121,10 @@ def _rename(names, replace_str):
         line = new_lines[nr - 1]
         new_lines[nr - 1] = line[:indent] + replace_str + \
             line[indent + len(name.name):]
+
     process(current_path, old_lines, new_lines)
-    return dct
+
+    return change_dct
 
 
 def extract(script, new_name, line=None, column=None, end_line=None, end_column=None):
