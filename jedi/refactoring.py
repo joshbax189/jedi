@@ -16,6 +16,7 @@ following functions (sometimes bug-prone):
 - inline variable
 """
 import difflib
+import os.path
 
 from parso import python_bytes_to_unicode, split_lines
 from parso.tree import search_ancestor
@@ -79,8 +80,6 @@ def rename(script, new_name, line=None, column=None, **kwargs):
     return Refactoring(_rename(script.get_references(line, column), new_name, script._code))
 
 
-# TODO special case where rename forces a file rename
-# E.g. by renaming in an import statement
 def _rename(names, replace_str, source=None):
     """ Replace names in Definitions with a given string, generating a refactoring dict.
     Used for both rename and inline. There should be one name entry for each occurrence to be
@@ -96,9 +95,12 @@ def _rename(names, replace_str, source=None):
                            reverse=True)
     change_dct = {}
 
-    def process(path, old_lines, new_lines):
+    def save_to_dct(path, old_lines, new_lines):
         if new_lines is not None:  # goto next file, save last
-            change_dct[path] = path, old_lines, new_lines
+            if path in change_dct:
+                change_dct[path] = change_dct[path][0], old_lines, new_lines
+            else:
+                change_dct[path] = path, old_lines, new_lines
 
     current_path = object()
     new_lines = old_lines = None
@@ -106,7 +108,7 @@ def _rename(names, replace_str, source=None):
         if name.in_builtin_module():
             continue
         if current_path != name.module_path:
-            process(current_path, old_lines, new_lines)
+            save_to_dct(current_path, old_lines, new_lines)
             current_path = name.module_path
 
             if current_path is not None:
@@ -117,12 +119,26 @@ def _rename(names, replace_str, source=None):
             new_lines = split_lines(python_bytes_to_unicode(source))
             old_lines = new_lines[:]
 
+        # apply renaming
         nr, indent = name.line, name.column
         line = new_lines[nr - 1]
         new_lines[nr - 1] = line[:indent] + replace_str + \
             line[indent + len(name.name):]
 
-    process(current_path, old_lines, new_lines)
+    save_to_dct(current_path, old_lines, new_lines)
+
+    if ordered_names and name.type == 'module':
+        # TODO account for package/subpackages
+        old_path = name.goto(follow_imports=True)[0].module_path
+        target_path = os.path.join(os.path.dirname(old_path), replace_str + '.py')
+        if os.path.exists(target_path):
+            raise ValueError("Cannot rename %s to %s" % (old_path, target_path))
+
+        with open(old_path) as f:
+            mod_source = f.read()
+
+        lines = split_lines(python_bytes_to_unicode(mod_source))
+        change_dct[old_path] = target_path, lines, lines
 
     return change_dct
 
